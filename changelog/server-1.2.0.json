@@ -1,0 +1,16 @@
+{
+  "component": "server",
+  "version": "1.2.0",
+  "items": [
+    {
+      "changeType": "changed",
+      "summaryEn": "Marking a fixed expense paid now also updates its next due date, category and payment method to match reality — not just the amount — when \"Keep fixed expenses in sync with reality\" is on.",
+      "summaryEs": "Marcar un gasto fijo como pagado ahora también actualiza su próxima fecha de vencimiento, categoría y método de pago para reflejar la realidad, no solo el importe, cuando \"Mantener los gastos fijos alineados con la realidad\" está activado."
+    },
+    {
+      "changeType": "fixed",
+      "summaryEn": "Bank transactions whose name includes a changing date or reference number are now recognized as the same recurring bill each time, instead of needing to be matched by hand every period.",
+      "summaryEs": "Las transacciones bancarias cuyo nombre incluye una fecha o número de referencia variable ahora se reconocen como la misma factura recurrente cada vez, en lugar de tener que emparejarlas manualmente cada período."
+    }
+  ]
+}

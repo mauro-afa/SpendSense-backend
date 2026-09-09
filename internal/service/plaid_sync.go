@@ -392,9 +392,10 @@ func (s *PlaidService) syncItemCore(ctx context.Context, item db.PlaidItem) (Ite
 					ID:             unpaid.ID,
 					BudgetPeriodID: *unpaid.BudgetPeriodID,
 					Amount:         amount, // use actual Plaid amount, not template planned amount
-					PaidDate:       unpaid.Date,
+					PaidDate:       date,   // the real Plaid-cleared date, not the fixed transaction's own scheduled date
 				},
 				autoUpdatePlanned,
+				observedPayment{CategoryID: categoryID, PaymentMethodID: paymentMethodID},
 				"plaid.auto_confirm",
 			); mErr != nil {
 				log.Printf("plaid item %s: auto-confirm %q: mark paid: %v", item.ID, tx.Name, mErr)
@@ -544,6 +545,9 @@ func (s *PlaidService) settlePendingTransaction(ctx context.Context, itemID uuid
 		log.Printf("plaid item %s: settle %q: read matched transaction %s: %v", itemID, tx.Name, review.MatchedTransactionID, mtErr)
 		return true
 	}
+	// Re-syncing the amount an already-confirmed bill settled at, not a fresh
+	// payment event — category/payment method were already handled at the
+	// original confirm, so no observedPayment override here.
 	if _, paidErr := markFixedTransactionPaid(ctx, s.transactions, s.fixedExpenses,
 		db.MarkTransactionAsPaidParams{
 			ID:             matchedTx.ID,
@@ -552,6 +556,7 @@ func (s *PlaidService) settlePendingTransaction(ctx context.Context, itemID uuid
 			PaidDate:       matchedTx.PaidDate,
 		},
 		autoUpdatePlanned,
+		observedPayment{},
 		"plaid.settle_pending",
 	); paidErr != nil {
 		log.Printf("plaid item %s: settle %q: update paid amount on matched transaction %s: %v",
@@ -658,7 +663,13 @@ func scoreBestMatch(name string, amount float64, categoryID *int32, pmID *uuid.U
 		}
 		aliasHit := false
 		for _, alias := range aliasesByFE[fe.ID] {
-			if strings.EqualFold(alias, name) {
+			aliasLower := strings.ToLower(alias)
+			// Exact match first (fast path, highest confidence); falling back
+			// to word overlap is what lets a saved alias survive a bank
+			// descriptor that embeds a changing date/reference number (e.g.
+			// "Manual DB-Bkrg 09/02" vs "10/02" next month) — see
+			// docs/features/transaction-review.md.
+			if strings.EqualFold(alias, name) || syncNameWordsOverlap(aliasLower, nameLower) {
 				aliasHit = true
 				break
 			}
@@ -697,7 +708,13 @@ func syncScoreBestMatch(tx plaidclient.Transaction, categoryID *int32, pmID *uui
 
 		aliasHit := false
 		for _, alias := range aliasesByFE[fe.ID] {
-			if strings.EqualFold(alias, tx.Name) {
+			aliasLower := strings.ToLower(alias)
+			// Exact match first (fast path, highest confidence); word overlap
+			// is the fallback that lets a saved alias survive a bank
+			// descriptor whose changing date/reference number would otherwise
+			// break an exact match every single time it recurs — see
+			// docs/features/transaction-review.md.
+			if strings.EqualFold(alias, tx.Name) || syncNameWordsOverlap(aliasLower, txNameLower) {
 				aliasHit = true
 				break
 			}

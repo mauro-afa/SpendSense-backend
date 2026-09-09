@@ -10,4 +10,4 @@ package version
 // human-readable semver rather than a git SHA injected at build time: a reader
 // opening "what's new" is being shown release notes, and notes have to hang
 // off something they can recognise.
-const Current = "1.1.5"
+const Current = "1.2.0"
