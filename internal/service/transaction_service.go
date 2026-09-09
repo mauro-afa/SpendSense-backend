@@ -446,6 +446,9 @@ func (s *TransactionService) MarkTransactionAsPaid(ctx context.Context, id uuid.
 		return db.Transaction{}, err
 	}
 
+	// No separate import to observe category/payment method from — a zero
+	// observedPayment lets the paid transaction's own (possibly user-edited)
+	// fields speak for it instead. See mark_paid.go.
 	return markFixedTransactionPaid(ctx, s.transactions, s.fixedExpenses,
 		db.MarkTransactionAsPaidParams{
 			ID:             id,
@@ -454,6 +457,7 @@ func (s *TransactionService) MarkTransactionAsPaid(ctx context.Context, id uuid.
 			PaidDate:       paidDate,
 		},
 		autoUpdatePlannedAmountFor(ctx, s.profiles, period.BudgetProfileID, "transaction.mark_paid"),
+		observedPayment{},
 		"transaction.mark_paid",
 	)
 }
@@ -619,13 +623,19 @@ func (s *TransactionService) ConfirmTransactionReview(ctx context.Context, userI
 		}
 
 		// Mark the matched transaction paid if it isn't already. Use the
-		// imported variable transaction's actual amount (what was really
-		// charged) rather than the planned amount so the overview reflects
-		// the true spend.
+		// imported variable transaction's actual amount and date (what was
+		// really charged, and when it really cleared) rather than the fixed
+		// transaction's own planned amount/scheduled date, so the overview
+		// reflects the true spend and the template (below) syncs to reality
+		// instead of just echoing back what it already had.
 		if !matchedTx.IsPaid && matchedTx.BudgetPeriodID != nil {
 			paidAmount := matchedTx.PlannedAmount
+			paidDate := matchedTx.Date
+			var observed observedPayment
 			if importedTxErr == nil {
 				paidAmount = importedTx.Amount
+				paidDate = importedTx.Date
+				observed = observedPayment{CategoryID: importedTx.CategoryID, PaymentMethodID: importedTx.PaymentMethodID}
 			}
 			// This error used to be discarded outright, so a bill that failed
 			// to be marked paid was indistinguishable from one that succeeded,
@@ -635,9 +645,10 @@ func (s *TransactionService) ConfirmTransactionReview(ctx context.Context, userI
 					ID:             matchedTx.ID,
 					BudgetPeriodID: *matchedTx.BudgetPeriodID,
 					Amount:         paidAmount,
-					PaidDate:       matchedTx.Date,
+					PaidDate:       paidDate,
 				},
 				autoUpdatePlannedAmountFor(ctx, s.profiles, period.BudgetProfileID, "transaction.confirm_review"),
+				observed,
 				"transaction.confirm_review",
 			); paidErr != nil {
 				// Fatal here, unlike the alias above: confirming a review whose

@@ -469,19 +469,43 @@ func (q *Queries) UpdateFixedExpense(ctx context.Context, arg UpdateFixedExpense
 	return i, err
 }
 
-const updateFixedExpensePlannedAmount = `-- name: UpdateFixedExpensePlannedAmount :exec
+const updateFixedExpenseFromPayment = `-- name: UpdateFixedExpenseFromPayment :exec
 UPDATE fixed_expense
-SET planned_amount = $1
-WHERE id = $2::uuid
+SET planned_amount    = $1,
+    day_of_month      = $2,
+    day_of_week       = $3,
+    anchor_date       = $4,
+    category_id       = $5,
+    payment_method_id = $6
+WHERE id = $7::uuid
 `
 
-type UpdateFixedExpensePlannedAmountParams struct {
-	PlannedAmount pgtype.Numeric `json:"planned_amount"`
-	ID            uuid.UUID      `json:"id"`
+type UpdateFixedExpenseFromPaymentParams struct {
+	PlannedAmount   pgtype.Numeric `json:"planned_amount"`
+	DayOfMonth      int32          `json:"day_of_month"`
+	DayOfWeek       int16          `json:"day_of_week"`
+	AnchorDate      pgtype.Date    `json:"anchor_date"`
+	CategoryID      *int32         `json:"category_id"`
+	PaymentMethodID *uuid.UUID     `json:"payment_method_id"`
+	ID              uuid.UUID      `json:"id"`
 }
 
-func (q *Queries) UpdateFixedExpensePlannedAmount(ctx context.Context, arg UpdateFixedExpensePlannedAmountParams) error {
-	_, err := q.db.Exec(ctx, updateFixedExpensePlannedAmount, arg.PlannedAmount, arg.ID)
+// Brings the template up to what actually happened when a bill was paid:
+// amount, due date (day_of_month/day_of_week/anchor_date, all derived
+// together from the same real paid date), category, and payment method. See
+// docs/features/planned-amount-follows-paid.md for which fields the caller
+// is expected to leave unchanged when it has no better value (category_id/
+// payment_method_id keep the template's own when nothing was observed).
+func (q *Queries) UpdateFixedExpenseFromPayment(ctx context.Context, arg UpdateFixedExpenseFromPaymentParams) error {
+	_, err := q.db.Exec(ctx, updateFixedExpenseFromPayment,
+		arg.PlannedAmount,
+		arg.DayOfMonth,
+		arg.DayOfWeek,
+		arg.AnchorDate,
+		arg.CategoryID,
+		arg.PaymentMethodID,
+		arg.ID,
+	)
 	return err
 }
 

@@ -48,9 +48,20 @@ SELECT EXISTS (
       AND date = sqlc.arg('target_date')::date
 ) AS exists;
 
--- name: UpdateFixedExpensePlannedAmount :exec
+-- name: UpdateFixedExpenseFromPayment :exec
+-- Brings the template up to what actually happened when a bill was paid:
+-- amount, due date (day_of_month/day_of_week/anchor_date, all derived
+-- together from the same real paid date), category, and payment method. See
+-- docs/features/planned-amount-follows-paid.md for which fields the caller
+-- is expected to leave unchanged when it has no better value (category_id/
+-- payment_method_id keep the template's own when nothing was observed).
 UPDATE fixed_expense
-SET planned_amount = sqlc.arg('planned_amount')
+SET planned_amount    = sqlc.arg('planned_amount'),
+    day_of_month      = sqlc.arg('day_of_month'),
+    day_of_week       = sqlc.arg('day_of_week'),
+    anchor_date       = sqlc.arg('anchor_date'),
+    category_id       = sqlc.arg('category_id'),
+    payment_method_id = sqlc.arg('payment_method_id')
 WHERE id = sqlc.arg('id')::uuid;
 
 -- name: DeactivateFixedExpense :exec

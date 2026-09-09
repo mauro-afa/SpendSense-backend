@@ -15,7 +15,7 @@ type FixedExpenseRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (db.FixedExpense, error)
 	List(ctx context.Context, budgetProfileID uuid.UUID) ([]db.FixedExpense, error)
 	Update(ctx context.Context, arg db.UpdateFixedExpenseParams) (db.FixedExpense, error)
-	UpdatePlannedAmount(ctx context.Context, arg db.UpdateFixedExpensePlannedAmountParams) error
+	UpdateFromPayment(ctx context.Context, arg db.UpdateFixedExpenseFromPaymentParams) error
 	Deactivate(ctx context.Context, arg db.DeactivateFixedExpenseParams) error
 	GetUnpaidTransaction(ctx context.Context, arg db.GetUnpaidTransactionByFixedExpenseParams) (db.Transaction, error)
 	GetUnpaidTransactionInPeriod(ctx context.Context, arg db.GetUnpaidTransactionByFixedExpenseInPeriodParams) (db.Transaction, error)
@@ -62,8 +62,8 @@ func (r *fixedExpenseRepository) Update(ctx context.Context, arg db.UpdateFixedE
 	return fe, err
 }
 
-func (r *fixedExpenseRepository) UpdatePlannedAmount(ctx context.Context, arg db.UpdateFixedExpensePlannedAmountParams) error {
-	return r.q.UpdateFixedExpensePlannedAmount(ctx, arg)
+func (r *fixedExpenseRepository) UpdateFromPayment(ctx context.Context, arg db.UpdateFixedExpenseFromPaymentParams) error {
+	return r.q.UpdateFixedExpenseFromPayment(ctx, arg)
 }
 
 func (r *fixedExpenseRepository) Deactivate(ctx context.Context, arg db.DeactivateFixedExpenseParams) error {

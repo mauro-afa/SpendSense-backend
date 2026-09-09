@@ -89,6 +89,40 @@ func TestSyncScoreBestMatch_FallsBackToWordOverlapWithoutAlias(t *testing.T) {
 	assert.Equal(t, 60.0, score)
 }
 
+// The reported case: a saved alias carrying a bank-supplied date/reference
+// number ("Manual DB-Bkrg 09/02") must still hit next month, when the same
+// merchant's real descriptor comes in with a different date ("10/02") — an
+// exact-string alias match would fail this every time, forever, since the
+// date never repeats.
+func TestSyncScoreBestMatch_AliasHitSurvivesADifferentTrailingDate(t *testing.T) {
+	feID := uuid.New()
+	fe := makeFixedExpense(t, feID, "Emma - broker", "120.00")
+	aliases := map[uuid.UUID][]string{feID: {"Manual DB-Bkrg 09/02"}}
+
+	tx := plaidclient.Transaction{Name: "Manual DB-Bkrg 10/02", Amount: 120.00}
+	score, bestFE, aliasHit, amountOK := syncScoreBestMatch(tx, nil, nil, []db.FixedExpense{fe}, aliases)
+
+	require.NotNil(t, bestFE)
+	assert.Equal(t, feID, bestFE.ID)
+	assert.True(t, aliasHit, "the alias should still hit via word overlap once the date is stripped")
+	assert.True(t, amountOK)
+	assert.Equal(t, 60.0, score)
+}
+
+// An alias for one fixed expense must not cross-match a transaction meant for
+// another just because both happen to be generic bank boilerplate with no
+// real shared word.
+func TestSyncScoreBestMatch_AliasDoesNotMatchWhenNoWordsAreShared(t *testing.T) {
+	feID := uuid.New()
+	fe := makeFixedExpense(t, feID, "Emma - broker", "120.00")
+	aliases := map[uuid.UUID][]string{feID: {"Manual DB-Bkrg 09/02"}}
+
+	tx := plaidclient.Transaction{Name: "Zelle Payment To John 10/02", Amount: 120.00}
+	_, _, aliasHit, _ := syncScoreBestMatch(tx, nil, nil, []db.FixedExpense{fe}, aliases)
+
+	assert.False(t, aliasHit)
+}
+
 func TestSyncScoreBestMatch_NoCandidatesReturnsNil(t *testing.T) {
 	tx := plaidclient.Transaction{Name: "Patreon", Amount: 5.33}
 	score, bestFE, aliasHit, amountOK := syncScoreBestMatch(tx, nil, nil, nil, nil)

@@ -1426,6 +1426,16 @@ func isoWeekday(t time.Time) int {
 	return d
 }
 
+// fixedExpenseScheduleFromAnchor derives day_of_month/day_of_week/anchor_date
+// from an explicit anchor date — the one place this three-way derivation
+// lives, shared by Create/UpdateFixedExpense and markFixedTransactionPaid's
+// paid-date propagation (mark_paid.go). Both day fields are always derived
+// together regardless of the expense's FrequencyUnit; which one scheduling
+// actually reads depends on that unit, not on which was set here.
+func fixedExpenseScheduleFromAnchor(anchor time.Time) (dayOfMonth, dayOfWeek int32, anchorDate pgtype.Date) {
+	return int32(anchor.Day()), int32(isoWeekday(anchor)), pgtype.Date{Time: anchor, Valid: true}
+}
+
 func (s *BudgetProfileService) CreateFixedExpense(ctx context.Context, profileID, userID uuid.UUID, inp FixedExpenseInput) (db.FixedExpense, *db.Transaction, error) {
 	if _, err := s.assertCollaboratorOrAbove(ctx, profileID, userID); err != nil {
 		return db.FixedExpense{}, nil, err
@@ -1444,9 +1454,7 @@ func (s *BudgetProfileService) CreateFixedExpense(ctx context.Context, profileID
 	}
 	anchorDate := pgtype.Date{}
 	if inp.AnchorDate != nil {
-		day = int32(inp.AnchorDate.Day())
-		dayOfWeek = int32(isoWeekday(*inp.AnchorDate))
-		anchorDate = pgtype.Date{Time: *inp.AnchorDate, Valid: true}
+		day, dayOfWeek, anchorDate = fixedExpenseScheduleFromAnchor(*inp.AnchorDate)
 	}
 	interval := inp.IntervalMonths
 	if interval < 1 {
@@ -1731,9 +1739,7 @@ func (s *BudgetProfileService) UpdateFixedExpense(ctx context.Context, id uuid.U
 	}
 	anchorDate := pgtype.Date{}
 	if inp.AnchorDate != nil {
-		day = int32(inp.AnchorDate.Day())
-		dayOfWeek = int32(isoWeekday(*inp.AnchorDate))
-		anchorDate = pgtype.Date{Time: *inp.AnchorDate, Valid: true}
+		day, dayOfWeek, anchorDate = fixedExpenseScheduleFromAnchor(*inp.AnchorDate)
 	}
 	interval := inp.IntervalMonths
 	if interval < 1 {

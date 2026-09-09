@@ -66,7 +66,7 @@ type mockFixedExpenseRepo struct {
 	getByID                    func(context.Context, uuid.UUID) (db.FixedExpense, error)
 	list                       func(context.Context, uuid.UUID) ([]db.FixedExpense, error)
 	update                     func(context.Context, db.UpdateFixedExpenseParams) (db.FixedExpense, error)
-	updatePlannedAmount        func(context.Context, db.UpdateFixedExpensePlannedAmountParams) error
+	updateFromPayment          func(context.Context, db.UpdateFixedExpenseFromPaymentParams) error
 	deactivate                 func(context.Context, db.DeactivateFixedExpenseParams) error
 	getUnpaidTransaction       func(context.Context, db.GetUnpaidTransactionByFixedExpenseParams) (db.Transaction, error)
 	getUnpaidTransactionInPer  func(context.Context, db.GetUnpaidTransactionByFixedExpenseInPeriodParams) (db.Transaction, error)
@@ -102,9 +102,9 @@ func (m *mockFixedExpenseRepo) Update(ctx context.Context, arg db.UpdateFixedExp
 	}
 	return db.FixedExpense{ID: arg.ID, Name: arg.Name}, nil
 }
-func (m *mockFixedExpenseRepo) UpdatePlannedAmount(ctx context.Context, arg db.UpdateFixedExpensePlannedAmountParams) error {
-	if m.updatePlannedAmount != nil {
-		return m.updatePlannedAmount(ctx, arg)
+func (m *mockFixedExpenseRepo) UpdateFromPayment(ctx context.Context, arg db.UpdateFixedExpenseFromPaymentParams) error {
+	if m.updateFromPayment != nil {
+		return m.updateFromPayment(ctx, arg)
 	}
 	return nil
 }
@@ -2180,6 +2180,87 @@ func TestConfirmTransactionReview_FixedExpenseMatch_MarksPaidAndSavesAlias(t *te
 	assert.Equal(t, "confirmed", confirmedStatus)
 	assert.Equal(t, importedTxID, excludedID, "should exclude the imported transaction from totals, not the matched one")
 	assert.True(t, excludedFlag, "the imported transaction stays visible but excluded, same as Income — not hidden from ListTransactions")
+}
+
+// Confirming a match should record the real-world paid date (when the
+// imported transaction actually cleared) and sync the template's
+// category/payment method to what was actually observed — not echo back the
+// fixed transaction's own stale scheduled date/category, which is what
+// day/category propagation would otherwise silently no-op against.
+func TestConfirmTransactionReview_UsesImportedDateAndSyncsObservedCategoryAndPaymentMethod(t *testing.T) {
+	userID := uuid.New()
+	profileID := uuid.New()
+	periodID := uuid.New()
+	reviewID := uuid.New()
+	importedTxID := uuid.New()
+	matchedTxID := uuid.New()
+	feID := uuid.New()
+	importedName := "NETFLIX.COM"
+	importedDate := pgtype.Date{Time: time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC), Valid: true}
+	scheduledDate := pgtype.Date{Time: time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC), Valid: true}
+	observedCategoryID := int32(7)
+	observedPMID := uuid.New()
+
+	importedAmount := numericFromString(t, "8.00")
+
+	var markedPaidDate pgtype.Date
+	var updated *db.UpdateFixedExpenseFromPaymentParams
+
+	svc := NewTransactionService(
+		&mockTransactionRepo{
+			getByID: func(_ context.Context, id uuid.UUID) (db.Transaction, error) {
+				if id == matchedTxID {
+					return db.Transaction{ID: matchedTxID, IsPaid: false, BudgetPeriodID: &periodID, FixedExpenseID: &feID, Date: scheduledDate}, nil
+				}
+				return db.Transaction{
+					ID: importedTxID, Name: &importedName, Amount: importedAmount, Date: importedDate,
+					CategoryID: &observedCategoryID, PaymentMethodID: &observedPMID,
+				}, nil
+			},
+			markAsPaid: func(_ context.Context, arg db.MarkTransactionAsPaidParams) (db.Transaction, error) {
+				markedPaidDate = arg.PaidDate
+				return db.Transaction{ID: arg.ID, FixedExpenseID: &feID}, nil
+			},
+			setExcluded: func(_ context.Context, arg db.SetTransactionExcludedParams) (db.Transaction, error) {
+				return db.Transaction{ID: arg.ID, IsExcluded: arg.Excluded}, nil
+			},
+		},
+		&mockBudgetProfileRepo{
+			getPeriodByID: func(_ context.Context, id uuid.UUID) (db.BudgetPeriod, error) {
+				return db.BudgetPeriod{ID: id, BudgetProfileID: profileID}, nil
+			},
+			getByID: func(_ context.Context, _ uuid.UUID) (db.BudgetProfile, error) {
+				return db.BudgetProfile{ID: profileID, UserID: userID, AutoUpdatePlannedAmount: true}, nil
+			},
+		},
+		&mockExpenseAllocationRepo{},
+		&mockFixedExpenseRepo{
+			getByID: func(_ context.Context, id uuid.UUID) (db.FixedExpense, error) {
+				return db.FixedExpense{ID: id}, nil
+			},
+			updateFromPayment: func(_ context.Context, arg db.UpdateFixedExpenseFromPaymentParams) error {
+				updated = &arg
+				return nil
+			},
+		},
+		&mockTransactionReviewRepo{
+			getByID: func(_ context.Context, id uuid.UUID) (db.TransactionReview, error) {
+				return db.TransactionReview{ID: id, BudgetPeriodID: periodID, TransactionID: importedTxID, MatchedTransactionID: matchedTxID}, nil
+			},
+			createAlias: func(_ context.Context, _ uuid.UUID, _ string) error { return nil },
+			updateStatus: func(_ context.Context, _ uuid.UUID, _ string) error { return nil },
+		},
+	)
+
+	err := svc.ConfirmTransactionReview(context.Background(), userID, reviewID, profileID)
+	require.NoError(t, err)
+	assert.Equal(t, importedDate, markedPaidDate, "should record when the bill actually cleared, not its original scheduled date")
+	require.NotNil(t, updated, "the template should sync when the budget opted in")
+	assert.Equal(t, int32(12), updated.DayOfMonth)
+	require.NotNil(t, updated.CategoryID)
+	assert.Equal(t, observedCategoryID, *updated.CategoryID)
+	require.NotNil(t, updated.PaymentMethodID)
+	assert.Equal(t, observedPMID, *updated.PaymentMethodID)
 }
 
 func TestConfirmTransactionReview_SavingsMatch_MarksPaidWithoutAlias(t *testing.T) {
