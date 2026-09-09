@@ -9,6 +9,7 @@ import (
 
 	"github.com/BeWellSpent/wellspent-backend/internal/apperr"
 	"github.com/BeWellSpent/wellspent-backend/internal/auth"
+	"github.com/BeWellSpent/wellspent-backend/internal/captcha"
 	"github.com/BeWellSpent/wellspent-backend/internal/config"
 	"github.com/BeWellSpent/wellspent-backend/internal/crypto"
 	db "github.com/BeWellSpent/wellspent-backend/internal/sqlc"
@@ -199,6 +200,19 @@ func (m *mockAppleAuth) RevokeRefreshToken(ctx context.Context, token string) er
 	return nil
 }
 
+// mockCaptchaVerifier defaults to "always passes" — most Register tests
+// aren't testing captcha behavior and shouldn't have to think about it.
+type mockCaptchaVerifier struct {
+	verify func(ctx context.Context, token, remoteIP string) (bool, error)
+}
+
+func (m *mockCaptchaVerifier) Verify(ctx context.Context, token, remoteIP string) (bool, error) {
+	if m.verify != nil {
+		return m.verify(ctx, token, remoteIP)
+	}
+	return true, nil
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func testJWT() *auth.JWTService {
@@ -210,13 +224,24 @@ func newAuthSvc(repo *mockUserRepo) *AuthService {
 }
 
 func newAuthSvcWithApple(repo *mockUserRepo, apple auth.AppleAuthenticator) *AuthService {
+	return newAuthSvcWithAppleAndCaptcha(repo, apple, &mockCaptchaVerifier{})
+}
+
+func newAuthSvcWithCaptcha(repo *mockUserRepo, verifier captcha.Verifier) *AuthService {
+	return newAuthSvcWithAppleAndCaptcha(repo, &mockAppleAuth{}, verifier)
+}
+
+func newAuthSvcWithAppleAndCaptcha(repo *mockUserRepo, apple auth.AppleAuthenticator, verifier captcha.Verifier) *AuthService {
 	// Empty ResendAPIKey routes sendVerificationEmail into its
 	// no-op "skipped" branch, so tests don't need a real Resend client.
 	// Empty Google OAuth credentials are fine — no test exercises the OAuth flow.
 	// EncryptionKey is a valid 32-byte hex key so the Apple refresh-token
 	// storage path runs for real rather than bailing out early.
-	cfg := &config.Config{EncryptionKey: strings.Repeat("ab", 32)}
-	return NewAuthService(repo, testJWT(), auth.NewGoogleOAuth("", "", ""), apple, cfg, zap.NewNop())
+	// CaptchaEnforcementEnabled: true so tests exercise the real check
+	// (matching dev/.env.dev) — CaptchaRejected/VerifierError/etc. below
+	// would be no-ops against the false default.
+	cfg := &config.Config{EncryptionKey: strings.Repeat("ab", 32), CaptchaEnforcementEnabled: true}
+	return NewAuthService(repo, testJWT(), auth.NewGoogleOAuth("", "", ""), apple, verifier, cfg, zap.NewNop())
 }
 
 func hashFor(t *testing.T, password string) string {
@@ -230,10 +255,97 @@ func hashFor(t *testing.T, password string) string {
 
 func TestRegister_Success(t *testing.T) {
 	repo := &mockUserRepo{}
-	result, err := newAuthSvc(repo).Register(context.Background(), "new@example.com", "Strong@1", "Jane", "Doe", "", "", "", "")
+	result, err := newAuthSvc(repo).Register(context.Background(), "new@example.com", "Strong@1", "Jane", "Doe", "", "", "", "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, result.AccessToken)
 	assert.Equal(t, int64(24*3600), result.ExpiresIn)
+}
+
+func TestRegister_CaptchaTokenPassedThroughToVerifier(t *testing.T) {
+	var gotToken string
+	verifier := &mockCaptchaVerifier{
+		verify: func(_ context.Context, token, _ string) (bool, error) {
+			gotToken = token
+			return true, nil
+		},
+	}
+	_, err := newAuthSvcWithCaptcha(&mockUserRepo{}, verifier).
+		Register(context.Background(), "new@example.com", "Strong@1", "", "", "", "", "", "", "the-real-token")
+
+	require.NoError(t, err)
+	assert.Equal(t, "the-real-token", gotToken)
+}
+
+func TestRegister_CaptchaRejected_FailsWithoutCreatingAnAccount(t *testing.T) {
+	created := false
+	repo := &mockUserRepo{
+		create: func(_ context.Context, arg db.CreateUserParams) (db.User, error) {
+			created = true
+			return db.User{ID: uuid.New(), Email: arg.Email, IsActive: true}, nil
+		},
+	}
+	verifier := &mockCaptchaVerifier{verify: func(context.Context, string, string) (bool, error) { return false, nil }}
+
+	_, err := newAuthSvcWithCaptcha(repo, verifier).
+		Register(context.Background(), "new@example.com", "Strong@1", "", "", "", "", "", "", "bad-token")
+
+	require.Error(t, err)
+	var ve *apperr.ValidationError
+	require.ErrorAs(t, err, &ve)
+	assert.False(t, created, "a rejected captcha must not reach account creation")
+}
+
+// A Cloudflare outage or network failure must fail closed, not open — a
+// captcha nobody can be checked against is not the same as no captcha at
+// all, and failing open here would defeat the entire point of having one.
+func TestRegister_CaptchaVerifierError_FailsClosed(t *testing.T) {
+	created := false
+	repo := &mockUserRepo{
+		create: func(_ context.Context, arg db.CreateUserParams) (db.User, error) {
+			created = true
+			return db.User{ID: uuid.New(), Email: arg.Email, IsActive: true}, nil
+		},
+	}
+	verifier := &mockCaptchaVerifier{verify: func(context.Context, string, string) (bool, error) {
+		return false, errors.New("cloudflare unreachable")
+	}}
+
+	_, err := newAuthSvcWithCaptcha(repo, verifier).
+		Register(context.Background(), "new@example.com", "Strong@1", "", "", "", "", "", "", "some-token")
+
+	require.Error(t, err)
+	assert.False(t, created)
+}
+
+// CaptchaEnforcementEnabled defaults to false — the backend and the web
+// widget that submits captcha_token are two independent deploys, so
+// enforcement must stay off until it's confirmed the widget is actually
+// live, not the moment this code merges. A rejected/empty token must not
+// block registration while the flag is off.
+func TestRegister_EnforcementDisabledByDefault_IgnoresARejectedCaptcha(t *testing.T) {
+	verifier := &mockCaptchaVerifier{verify: func(context.Context, string, string) (bool, error) { return false, nil }}
+	cfg := &config.Config{EncryptionKey: strings.Repeat("ab", 32)} // CaptchaEnforcementEnabled left at its false zero value
+	svc := NewAuthService(&mockUserRepo{}, testJWT(), auth.NewGoogleOAuth("", "", ""), &mockAppleAuth{}, verifier, cfg, zap.NewNop())
+
+	_, err := svc.Register(context.Background(), "new@example.com", "Strong@1", "", "", "", "", "", "", "")
+
+	require.NoError(t, err)
+}
+
+// Cheap local validation (email format) must not spend a Cloudflare request
+// on a request that was already going to fail.
+func TestRegister_InvalidEmail_NeverCallsTheCaptchaVerifier(t *testing.T) {
+	called := false
+	verifier := &mockCaptchaVerifier{verify: func(context.Context, string, string) (bool, error) {
+		called = true
+		return true, nil
+	}}
+
+	_, err := newAuthSvcWithCaptcha(&mockUserRepo{}, verifier).
+		Register(context.Background(), "not-an-email", "Strong@1", "", "", "", "", "", "", "tok")
+
+	require.Error(t, err)
+	assert.False(t, called)
 }
 
 func TestRegister_EmailNormalized(t *testing.T) {
@@ -244,13 +356,13 @@ func TestRegister_EmailNormalized(t *testing.T) {
 			return db.User{ID: uuid.New(), Email: arg.Email, IsActive: true}, nil
 		},
 	}
-	_, err := newAuthSvc(repo).Register(context.Background(), "  USER@Example.COM  ", "Strong@1", "", "", "", "", "", "")
+	_, err := newAuthSvc(repo).Register(context.Background(), "  USER@Example.COM  ", "Strong@1", "", "", "", "", "", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "user@example.com", capturedEmail)
 }
 
 func TestRegister_InvalidEmail(t *testing.T) {
-	_, err := newAuthSvc(&mockUserRepo{}).Register(context.Background(), "not-an-email", "Strong@1", "", "", "", "", "", "")
+	_, err := newAuthSvc(&mockUserRepo{}).Register(context.Background(), "not-an-email", "Strong@1", "", "", "", "", "", "", "")
 	require.Error(t, err)
 	var ve *apperr.ValidationError
 	require.ErrorAs(t, err, &ve)
@@ -266,7 +378,7 @@ func TestRegister_SendsVerificationToken(t *testing.T) {
 			return db.User{ID: arg.ID}, nil
 		},
 	}
-	result, err := newAuthSvc(repo).Register(context.Background(), "new@example.com", "Strong@1", "Jane", "Doe", "", "", "", "")
+	result, err := newAuthSvc(repo).Register(context.Background(), "new@example.com", "Strong@1", "Jane", "Doe", "", "", "", "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, result.AccessToken)
 	require.True(t, called, "expected a verification token to be minted")
@@ -281,7 +393,7 @@ func TestRegister_VerificationEmailFailure_DoesNotFailRegistration(t *testing.T)
 			return db.User{}, assert.AnError
 		},
 	}
-	result, err := newAuthSvc(repo).Register(context.Background(), "new@example.com", "Strong@1", "", "", "", "", "", "")
+	result, err := newAuthSvc(repo).Register(context.Background(), "new@example.com", "Strong@1", "", "", "", "", "", "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, result.AccessToken)
 }
@@ -292,7 +404,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 			return db.User{Email: email, IsActive: true}, nil
 		},
 	}
-	_, err := newAuthSvc(repo).Register(context.Background(), "exists@example.com", "Strong@1", "", "", "", "", "", "")
+	_, err := newAuthSvc(repo).Register(context.Background(), "exists@example.com", "Strong@1", "", "", "", "", "", "", "")
 	require.Error(t, err)
 	var de *apperr.DuplicateError
 	require.ErrorAs(t, err, &de)

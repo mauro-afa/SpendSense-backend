@@ -11,6 +11,7 @@ import (
 
 	"github.com/BeWellSpent/wellspent-backend/internal/apperr"
 	"github.com/BeWellSpent/wellspent-backend/internal/auth"
+	"github.com/BeWellSpent/wellspent-backend/internal/captcha"
 	"github.com/BeWellSpent/wellspent-backend/internal/config"
 	"github.com/BeWellSpent/wellspent-backend/internal/crypto"
 	"github.com/BeWellSpent/wellspent-backend/internal/repository"
@@ -47,16 +48,17 @@ const (
 )
 
 type AuthService struct {
-	users  repository.UserRepository
-	jwt    *auth.JWTService
-	google *auth.GoogleOAuth
-	apple  auth.AppleAuthenticator
-	cfg    *config.Config
-	log    *zap.Logger
-	mailer *VerificationMailer
+	users   repository.UserRepository
+	jwt     *auth.JWTService
+	google  *auth.GoogleOAuth
+	apple   auth.AppleAuthenticator
+	captcha captcha.Verifier
+	cfg     *config.Config
+	log     *zap.Logger
+	mailer  *VerificationMailer
 }
 
-func NewAuthService(users repository.UserRepository, jwt *auth.JWTService, google *auth.GoogleOAuth, apple auth.AppleAuthenticator, cfg *config.Config, log *zap.Logger) *AuthService {
+func NewAuthService(users repository.UserRepository, jwt *auth.JWTService, google *auth.GoogleOAuth, apple auth.AppleAuthenticator, captchaVerifier captcha.Verifier, cfg *config.Config, log *zap.Logger) *AuthService {
 	if users == nil {
 		panic("NewAuthService: users is required")
 	}
@@ -69,6 +71,9 @@ func NewAuthService(users repository.UserRepository, jwt *auth.JWTService, googl
 	if apple == nil {
 		panic("NewAuthService: apple is required")
 	}
+	if captchaVerifier == nil {
+		panic("NewAuthService: captchaVerifier is required")
+	}
 	if cfg == nil {
 		panic("NewAuthService: cfg is required")
 	}
@@ -76,12 +81,13 @@ func NewAuthService(users repository.UserRepository, jwt *auth.JWTService, googl
 		panic("NewAuthService: log is required")
 	}
 	return &AuthService{
-		users:  users,
-		jwt:    jwt,
-		google: google,
-		apple:  apple,
-		cfg:    cfg,
-		log:    log,
+		users:   users,
+		jwt:     jwt,
+		google:  google,
+		apple:   apple,
+		captcha: captchaVerifier,
+		cfg:     cfg,
+		log:     log,
 		// Built here rather than injected: every dependency it needs is
 		// already a required argument, so an extra parameter would add
 		// churn at every call site for no added flexibility.
@@ -411,13 +417,32 @@ type RegisterResult struct {
 	ExpiresIn   int64
 }
 
-func (s *AuthService) Register(ctx context.Context, email, password, firstName, lastName, countryCode, stateCode, language, currency string) (RegisterResult, error) {
+func (s *AuthService) Register(ctx context.Context, email, password, firstName, lastName, countryCode, stateCode, language, currency, captchaToken string) (RegisterResult, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if _, err := mail.ParseAddress(email); err != nil {
 		return RegisterResult{}, apperr.Invalid("invalid email address")
 	}
 	if err := validatePassword(password); err != nil {
 		return RegisterResult{}, err
+	}
+
+	// Cheap local checks first, then the external network call, then the DB
+	// round-trip below — no point spending a Cloudflare request on a request
+	// that was already going to fail format validation. "Couldn't verify"
+	// (a Cloudflare/network failure) and "verification failed" (a real
+	// rejection) are deliberately treated the same here: Register has no use
+	// for the distinction, and failing open on a captcha *outage* would
+	// defeat the entire point of having one.
+	//
+	// Gated on CaptchaEnforcementEnabled (default false) — see that field's
+	// doc comment in config.go for why this can't just always be on.
+	if s.cfg.CaptchaEnforcementEnabled {
+		if ok, err := s.captcha.Verify(ctx, captchaToken, ""); err != nil || !ok {
+			if err != nil {
+				s.log.Warn("auth.register.captcha_verify_error", zap.Error(err))
+			}
+			return RegisterResult{}, apperr.Invalid("captcha verification failed")
+		}
 	}
 
 	_, err := s.users.GetByEmail(ctx, email)
