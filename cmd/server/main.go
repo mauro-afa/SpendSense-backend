@@ -13,6 +13,7 @@ import (
 
 	"github.com/BeWellSpent/wellspent-backend/gen/wellspent/v1/wellspentv1connect"
 	"github.com/BeWellSpent/wellspent-backend/internal/auth"
+	"github.com/BeWellSpent/wellspent-backend/internal/captcha"
 	"github.com/BeWellSpent/wellspent-backend/internal/config"
 	"github.com/BeWellSpent/wellspent-backend/internal/db"
 	"github.com/BeWellSpent/wellspent-backend/internal/handler"
@@ -70,7 +71,8 @@ func main() {
 	appleAuth := auth.NewAppleAuth(cfg.AppleClientID, cfg.AppleTeamID, cfg.AppleKeyID, cfg.ApplePrivateKey)
 
 	// Services
-	authSvc := service.NewAuthService(userRepo, jwtSvc, googleOAuth, appleAuth, cfg, logger)
+	captchaClient := captcha.New(cfg.TurnstileSecretKey)
+	authSvc := service.NewAuthService(userRepo, jwtSvc, googleOAuth, appleAuth, captchaClient, cfg, logger)
 	userSvc := service.NewUserService(userRepo, appleAuth, cfg.EncryptionKey, cfg, logger)
 	notifSvc := service.NewNotificationService(notifRepo, transactionRepo, budgetProfileRepo, allocationRepo, userRepo, cfg, logger)
 	statusBannerSvc := service.NewStatusBannerService(statusBannerRepo, userRepo)

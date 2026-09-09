@@ -1,0 +1,11 @@
+{
+  "component": "server",
+  "version": "1.3.0",
+  "items": [
+    {
+      "changeType": "added",
+      "summaryEn": "Registering a new account now includes a quick, usually invisible check to keep automated bots from creating accounts.",
+      "summaryEs": "Registrar una cuenta nueva ahora incluye una verificación rápida, generalmente invisible, para evitar que bots automatizados creen cuentas."
+    }
+  ]
+}

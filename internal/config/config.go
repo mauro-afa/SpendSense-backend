@@ -51,6 +51,23 @@ type Config struct {
 	PlaidEnv        string `envconfig:"PLAID_ENV" default:"sandbox"`
 	EncryptionKey   string `envconfig:"ENCRYPTION_KEY"`
 
+	// TurnstileSecretKey verifies the captcha token web's Register form
+	// submits (internal/captcha). Empty means "no key configured" — Register
+	// rejects with a clear error rather than silently skipping verification,
+	// unlike the no-op-with-a-log-warning pattern above: a missing captcha
+	// secret is a deploy misconfiguration, not an optional integration.
+	TurnstileSecretKey string `envconfig:"TURNSTILE_SECRET_KEY"`
+	// CaptchaEnforcementEnabled gates whether Register actually rejects a
+	// missing/invalid captcha token. Defaults false deliberately: this
+	// backend and the web widget that submits captcha_token are two
+	// independent deploys (Cloud Run vs. Vercel), and the backend's merge
+	// auto-deploys to prod on its own. Shipping enforcement on by default
+	// would hard-break every registration on the live site the moment this
+	// PR lands, for however long it takes the web PR to also deploy. Flip
+	// this on in prod (an env var change, no redeploy needed) only once the
+	// web widget is confirmed live — see docs/features/turnstile-captcha.md.
+	CaptchaEnforcementEnabled bool `envconfig:"CAPTCHA_ENFORCEMENT_ENABLED" default:"false"`
+
 	// PlaidHTTPMaxRetries/PlaidHTTPRetryDelay configure the Plaid API HTTP
 	// transport's retry-on-failure (network errors, 429, 5xx — not 4xx,
 	// which won't succeed on retry).

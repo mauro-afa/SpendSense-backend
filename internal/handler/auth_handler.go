@@ -20,7 +20,7 @@ func NewAuthHandler(svc *service.AuthService) *AuthHandler {
 }
 
 func (h *AuthHandler) Register(ctx context.Context, req *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error) {
-	result, err := h.svc.Register(ctx, req.Msg.Email, req.Msg.Password, req.Msg.FirstName, req.Msg.LastName, req.Msg.CountryCode, req.Msg.StateCode, req.Msg.Language, req.Msg.Currency)
+	result, err := h.svc.Register(ctx, req.Msg.Email, req.Msg.Password, req.Msg.FirstName, req.Msg.LastName, req.Msg.CountryCode, req.Msg.StateCode, req.Msg.Language, req.Msg.Currency, req.Msg.CaptchaToken)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
